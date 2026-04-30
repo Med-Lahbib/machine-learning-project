@@ -20,6 +20,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
+from plotly.subplots import make_subplots
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -568,33 +569,76 @@ with tab2:
         st.error("⚠️ Recommender not loaded. Run `python train_embeddings.py` first.")
     else:
         col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.markdown(
-                '<div class="metric-card"><h3>Books Indexed</h3>'
-                f'<p>{stats.get("num_books", 0)}</p></div>',
-                unsafe_allow_html=True,
+        st.markdown("### 🧠 Model Architecture & Parameters")
+        
+        # Calculate parameters for display
+        def count_parameters(model):
+            # Embedding params
+            emb = model.embedding.num_embeddings * model.embedding.embedding_dim
+            # LSTM params
+            lstm = sum(p.numel() for p in model.lstm.parameters())
+            # FC params
+            fc = sum(p.numel() for p in model.fc.parameters())
+            return emb, lstm, fc
+
+        emb_p, lstm_p, fc_p = count_parameters(model)
+        total_p = emb_p + lstm_p + fc_p
+        
+        col_arch1, col_arch2 = st.columns([3, 2])
+        
+        with col_arch1:
+            st.markdown("#### Neural Flow & Activations")
+            
+            def layer_box(num, name, shape, details, act=None):
+                act_html = f'<div style="color: #667eea; font-weight: 700; font-size: 0.75rem; margin-top: 4px;">⚡ Activation: {act}</div>' if act else ""
+                st.markdown(f"""
+                <div style="background: white; border: 1px solid #e2e8f0; border-left: 5px solid #667eea; padding: 12px; border-radius: 8px; margin-bottom: 0px;">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <span style="font-weight: 700; color: #1e293b; font-size: 0.9rem;">{num}. {name}</span>
+                        <span style="background: #f1f5f9; color: #475569; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-family: monospace;">{shape}</span>
+                    </div>
+                    <div style="font-size: 0.8rem; color: #64748b; margin-top: 4px;">{details}</div>
+                    {act_html}
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown('<div style="text-align: center; color: #cbd5e1; margin: 2px 0;">↓</div>', unsafe_allow_html=True)
+
+            layer_box("01", "Input Layer", "1 x 150", "Tokenized text sequences (integer indices)")
+            layer_box("02", "Embedding", f"{len(vocab.word2idx)} x 100", "Semantic word projection", "Linear / Lookup")
+            layer_box("03", "Bi-LSTM", "150 x 512", "Temporal feature extraction (2-layer, bidirectional)", "Tanh / Sigmoid")
+            layer_box("04", "Hidden Dense", "512 x 256", "High-level feature mapping", "ReLU")
+            layer_box("05", "Dropout", "256", "Regularization (rate: 0.3)", "N/A")
+            layer_box("06", "Output Projection", "256 x 128", "L2-normalized semantic embedding", "L2-Norm")
+
+        with col_arch2:
+            st.markdown("#### Parameter Distribution")
+            
+            # Pie chart for parameters
+            fig_p = px.pie(
+                values=[emb_p, lstm_p, fc_p],
+                names=['Embedding', 'LSTM (Bi-Dir)', 'Dense Head'],
+                hole=0.5,
+                color_discrete_sequence=['#667eea', '#764ba2', '#a0aec0']
             )
-        with col2:
-            st.markdown(
-                '<div class="metric-card"><h3>Embedding Dim</h3>'
-                f'<p>{stats.get("embedding_dim", 128)}D</p></div>',
-                unsafe_allow_html=True,
+            fig_p.update_layout(
+                margin=dict(l=0, r=0, t=0, b=0),
+                height=250,
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5)
             )
-        with col3:
-            st.markdown(
-                '<div class="metric-card"><h3>Model</h3>'
-                f'<p style="font-size: 1rem;">LSTM</p></div>',
-                unsafe_allow_html=True,
-            )
-        with col4:
-            st.markdown(
-                '<div class="metric-card"><h3>Dataset</h3>'
-                f'<p style="font-size: 1rem;">{stats.get("dataset_name", "Unknown")}</p></div>',
-                unsafe_allow_html=True,
-            )
+            st.plotly_chart(fig_p, use_container_width=True)
+            
+            st.markdown(f"""
+            <div style="background: #f8fafc; padding: 15px; border-radius: 10px; border: 1px solid #e2e8f0;">
+                <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 5px;">Total Trainable Parameters</div>
+                <div style="font-size: 1.8rem; font-weight: 800; color: #1e293b;">{total_p:,}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.markdown("#### Logic")
+            st.caption("The model utilizes **Triplet Loss** during training to ensure that the Euclidean distance between content-similar books is minimized in the 128D embedding space.")
 
         st.markdown("---")
-        st.markdown("### How It Works")
         st.markdown("""
         This recommendation system uses **LSTM-based learned embeddings** with **triplet loss** 
         to find semantically similar books.
@@ -638,45 +682,126 @@ with tab2:
             with open(os.path.join(MODEL_DIR, "training_history.json"), "r") as f:
                 raw_history = json.load(f)
 
-            # Normalize history formats: support list of dicts or dict of lists
+            # Normalize into a list of epoch dicts
+            history = []
             if isinstance(raw_history, list):
-                train_loss = [h.get('train_loss') for h in raw_history]
-                val_loss = [h.get('val_loss') for h in raw_history]
+                history = raw_history
             elif isinstance(raw_history, dict):
-                train_loss = raw_history.get('train_loss') or raw_history.get('train_losses') or []
-                val_loss = raw_history.get('val_loss') or raw_history.get('val_losses') or []
+                # dict of lists -> convert to list of dicts
+                # find length from any list value
+                lengths = [len(v) for v in raw_history.values() if isinstance(v, list)]
+                n = max(lengths) if lengths else 0
+                for i in range(n):
+                    entry = {}
+                    for k, v in raw_history.items():
+                        if isinstance(v, list) and i < len(v):
+                            entry[k] = v[i]
+                    history.append(entry)
+
+            # helper to extract series by trying multiple key names
+            def extract_series(history, keys):
+                for k in keys:
+                    vals = [h.get(k) for h in history if h.get(k) is not None]
+                    if vals:
+                        return vals
+                return []
+
+            train_loss = extract_series(history, ['train_loss', 'train_losses', 'loss'])
+            val_loss = extract_series(history, ['val_loss', 'val_losses', 'val'])
+            train_acc = extract_series(history, ['train_acc', 'train_accuracy', 'accuracy', 'acc'])
+            val_acc = extract_series(history, ['val_acc', 'val_accuracy', 'val_accuracy', 'val_acc'])
+            precision = extract_series(history, ['precision', 'val_precision', 'precision_score'])
+            recall = extract_series(history, ['recall', 'val_recall', 'recall_score'])
+            f1 = extract_series(history, ['f1', 'f1_score', 'val_f1'])
+
+            epochs = list(range(1, max(len(train_loss), len(val_loss), len(train_acc), len(val_acc)) + 1))
+
+            # Build subplot: losses on top, metrics underneath (if present)
+            row_heights = [0.6, 0.4]
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                                row_heights=row_heights, subplot_titles=("Loss (Train vs Validation)", "Metrics"))
+
+            if train_loss:
+                fig.add_trace(go.Scatter(x=list(range(1, len(train_loss) + 1)), y=train_loss,
+                                         mode='lines+markers', name='Train Loss', line=dict(color='#667eea', width=2),
+                                         marker=dict(size=6)), row=1, col=1)
+            if val_loss:
+                fig.add_trace(go.Scatter(x=list(range(1, len(val_loss) + 1)), y=val_loss,
+                                         mode='lines+markers', name='Validation Loss', line=dict(color='#764ba2', width=2),
+                                         marker=dict(size=6)), row=1, col=1)
+
+            # Add metrics traces (accuracy / precision / recall / f1) to row 2
+            metric_present = False
+            if train_acc or val_acc:
+                metric_present = True
+                if train_acc:
+                    fig.add_trace(go.Scatter(x=list(range(1, len(train_acc) + 1)), y=train_acc,
+                                             mode='lines+markers', name='Train Accuracy', line=dict(color='#06b6d4', width=2)), row=2, col=1)
+                if val_acc:
+                    fig.add_trace(go.Scatter(x=list(range(1, len(val_acc) + 1)), y=val_acc,
+                                             mode='lines+markers', name='Val Accuracy', line=dict(color='#0ea5a4', width=2)), row=2, col=1)
+
+            if precision:
+                metric_present = True
+                fig.add_trace(go.Scatter(x=list(range(1, len(precision) + 1)), y=precision,
+                                         mode='lines+markers', name='Precision', line=dict(color='#f59e0b', width=2)), row=2, col=1)
+            if recall:
+                metric_present = True
+                fig.add_trace(go.Scatter(x=list(range(1, len(recall) + 1)), y=recall,
+                                         mode='lines+markers', name='Recall', line=dict(color='#ef4444', width=2)), row=2, col=1)
+            if f1:
+                metric_present = True
+                fig.add_trace(go.Scatter(x=list(range(1, len(f1) + 1)), y=f1,
+                                         mode='lines+markers', name='F1-score', line=dict(color='#7c3aed', width=2)), row=2, col=1)
+
+            fig.update_xaxes(title_text="Epoch", row=2, col=1)
+            fig.update_yaxes(title_text="Triplet Loss", row=1, col=1)
+            if metric_present:
+                fig.update_yaxes(title_text="Metric Value", row=2, col=1)
             else:
-                train_loss, val_loss = [], []
+                # remove subtitle if no metrics
+                fig.layout.annotations[1].text = "(No additional metrics found)"
 
-            # Create a plot
-            fig = go.Figure()
-
-            epochs = list(range(1, len(train_loss) + 1))
-
-            fig.add_trace(go.Scatter(
-                x=epochs,
-                y=train_loss,
-                mode='lines+markers',
-                name='Train Loss',
-                line=dict(color='#667eea', width=2),
-                marker=dict(size=6)
-            ))
-
-            fig.add_trace(go.Scatter(
-                x=epochs,
-                y=val_loss,
-                mode='lines+markers',
-                name='Validation Loss',
-                line=dict(color='#764ba2', width=2),
-                marker=dict(size=6)
-            ))
-            
-            fig.update_layout(
-                title="Model Training Convergence",
-                xaxis_title="Epoch",
-                yaxis_title="Triplet Loss",
-                hovermode='x unified',
-                height=400,
-            )
-            
+            fig.update_layout(height=600, hovermode='x unified')
             st.plotly_chart(fig, use_container_width=True)
+
+            # Diagnostics: simple heuristics for overfitting / underfitting / stability
+            diag_msgs = []
+            if train_loss and val_loss:
+                final_train = train_loss[-1]
+                final_val = val_loss[-1]
+                # Overfitting: val loss significantly higher than train loss and trend diverging
+                if final_val - final_train > 0.02 and (np.mean(val_loss[-3:]) > np.mean(train_loss[-3:])):
+                    diag_msgs.append(("Overfitting", "Validation loss is higher than training loss — possible overfitting."))
+                # Underfitting: both losses high and not decreasing much
+                if final_train > 0.5 and final_val > 0.5 and (np.mean(train_loss[:3]) - final_train) < 0.01:
+                    diag_msgs.append(("Underfitting", "Both train and validation loss remain high — model may be underfitting."))
+                # Stability: oscillation in validation loss
+                if len(val_loss) >= 6:
+                    recent_std = float(np.std(val_loss[-6:]))
+                    recent_mean = float(np.mean(val_loss[-6:]))
+                    if recent_std / (recent_mean + 1e-9) > 0.05:
+                        diag_msgs.append(("Unstable", "Validation loss shows oscillation — training stability may be an issue."))
+
+            # Display diagnostics
+            if diag_msgs:
+                for title, msg in diag_msgs:
+                    st.warning(f"**{title}:** {msg}")
+            else:
+                st.success("No obvious overfitting/underfitting signals detected from available training history.")
+
+            # Show final metric values if available
+            metric_line = []
+            if train_acc or val_acc:
+                metric_line.append(f"Final Train Acc: {train_acc[-1]:.3f}" if train_acc else None)
+                metric_line.append(f"Final Val Acc: {val_acc[-1]:.3f}" if val_acc else None)
+            if precision:
+                metric_line.append(f"Precision: {precision[-1]:.3f}")
+            if recall:
+                metric_line.append(f"Recall: {recall[-1]:.3f}")
+            if f1:
+                metric_line.append(f"F1: {f1[-1]:.3f}")
+
+            if any(metric_line):
+                metric_line = [m for m in metric_line if m]
+                st.markdown("**Final Metrics:** " + " | ".join(metric_line))
