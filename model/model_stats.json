@@ -1,0 +1,7 @@
+{
+  "num_books": 1000,
+  "vocab_size": 5000,
+  "embedding_dim": 128,
+  "best_val_loss": 0.4312076210975647,
+  "model_type": "LSTM Embedding"
+}

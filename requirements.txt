@@ -1,0 +1,16 @@
+requests
+beautifulsoup4
+pandas
+tqdm
+torch
+streamlit
+matplotlib
+seaborn
+plotly
+datasets
+torch
+streamlit
+matplotlib
+seaborn
+plotly
+datasets
